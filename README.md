@@ -1,52 +1,70 @@
-# epicsdev_tektronix
-Python-based EPICS PVAccess server for Tektronix MSO oscilloscopes (4, 5, and 6 Series).
+# epicsdev_osc_tektronix_mso
 
-It is based on [p4p](https://epics-base.github.io/p4p/) and [epicsdev](https://github.com/ASukhanov/epicsdev) packages 
-and it can run standalone on Linux, OSX, and Windows platforms.
+EPICS PVAccess server for Tektronix oscilloscopes (MSO and DPO families), implemented with `epicsdev`.
 
-This implementation is adapted from [epicsdev_rigol_scope](https://github.com/ASukhanov/epicsdev_rigol_scope) 
-and supports Tektronix MSO series oscilloscopes using SCPI commands as documented in the 
-[Tektronix 4-5-6 Series MSO Programmer Manual](https://download.tek.com/manual/4-5-6-Series-MSO-Programmer_077130524.pdf).
-
-## Installation
-```pip install epicsdev_tektronix```
-
-For control GUI and plotting:
-```pip install pypeto,pvplot```
-
-Control GUI:
-```python -m pypeto -c path_to_repository/config -f epicsdev_tektronix```
+- Main server module: [epicsdev_osc_tektronix_mso/__main__.py](epicsdev_osc_tektronix_mso/__main__.py)
+- OPI generator: [opi/generate_simplescope.py](opi/generate_simplescope.py)
 
 ## Features
-- Support for Tektronix MSO oscilloscopes (configurable)
-- Real-time waveform acquisition via EPICS PVAccess
-- SCPI command interface for scope control
-- Support for multiple trigger modes (AUTO, NORMAL, SINGLE)
-- Configurable horizontal and vertical scales
-- Channel-specific controls (coupling, offset, termination)
-- Performance timing diagnostics
 
-## Command-line Options
-- `-a, --autosave`: Autosave control
-- `-c, --recall`: if given: disable recalling of autosaved PVs 
-- `-C, --channels`: Number of channels per device (default: 4)
-- `-d, --device`: Device name for PV prefix (default: 'tektronix')
-- `-i, --index`: Device index for PV prefix (default: '0')
-- `-r, --resource`: VISA resource string (default: 'TCPIP::192.168.1.100::INSTR')
-- `-v, --verbose`: Increase verbosity (-vv for debug output)
+- VISA/SCPI connection to Tektronix instruments via TCP/IP or USB interfaces
+- Live waveform publishing over PVAccess
+- EPICS PVs reflects live oscilloscope parameters
+- Per-channel control/readback:
+	- `cNNOnOff`, `cNNCoupling`, `cNNVoltsPerDiv`, `cNNOffset`, `cNNTermination`
+	- `cNNWaveform`, `cNNMean`, `cNNPeak2Peak`, `cNNRMS`
+- Scope-level PVs:
+	- `timePerDiv`, `recLengthS`, `recLengthR`, `samplingRate`, `tAxis`
+	- `trigType`, `trigMode`, `trigSource`, `trigSlope`, `trigLevel`, `trigState`, `trigger`
+	- `setup`, `instrCmdS`, `instrCmdR`, `acqCount`, `lostTrigs`, `timing`
+- Model-aware channel count (when `--channels` is not provided)
 
-## Example Usage
-```bash
-python -m epicsdev_tektronix.mso -r'TCPIP::192.168.1.100::4000:SOCKET'
-```
-Control GUI:
-```python -m pypeto -c path_to_repository/config -f epicsdev_tektronix```
+## Requirements
 
-## Supported Tektronix Models
-- MSO44, MSO46, MSO48 (4 Series)
-- MSO54, MSO56, MSO58 (5 Series)
-- MSO64 (6 Series)
-- Other MSO series models using compatible SCPI commands
+- Python 3.11+
+- `p4p>=4.2.2`
+- `epicsdev>=3.0.1`
+- `numpy`
+- `pyvisa` + a VISA backend (for example `pyvisa-py`)
 
-## Performance
-Acquisition time of 6 channels, each with 1M of floating point values is 2.0 s. Throughput maxes out at 12 MB/s.
+## Install
+
+- `pip install epicsdev_osc_tektronix_mso`
+
+## Run
+
+- `python -m epicsdev_osc_tektronix_mso`
+
+Example:
+
+- `python -m epicsdev_osc_tektronix_mso -r TCPIP::192.168.1.100::5025::SOCKET -d tektronix -i 0 -v`
+
+Default PV prefix:
+
+- `tektronix0:`
+
+## Command-line options
+
+- `-a, --autosave` autosave control (optional argument)
+- `-c, --recall` disable restore from autosave cache
+- `-C, --channels` number of channels (auto-detected when omitted)
+- `-d, --device` PV prefix device root (default: `tektronix`)
+- `-i, --index` PV prefix index (default: `0`)
+- `-r, --resource` VISA resource (default: `TCPIP::192.168.1.100::5025::SOCKET`)
+- `-p, --putlogPV` PV used for put logging (default: `putlog:dump`)
+- `-v, --verbose` increase verbosity (`-vv` for more)
+
+## OPI
+
+Generate a simple Phoebus screen:
+
+- `python opi/generate_simplescope.py`
+
+Output:
+
+- [opi/simplescope.bob](opi/simplescope.bob)
+
+## Notes
+
+- `INSTR` VISA endpoints are usually more reliable; `SOCKET` can be faster for large waveform transfers.
+- Refer to [docs/README.md](docs/README.md) and [docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md) for implementation details.
