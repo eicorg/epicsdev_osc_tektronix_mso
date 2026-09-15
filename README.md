@@ -2,6 +2,8 @@
 
 EPICS PVAccess server for Tektronix oscilloscopes (MSO and DPO families), implemented with `epicsdev`.
 
+Tested with TCPIP interface on MSO64B and USB interface on DPO2004B.
+
 - Main server module: [epicsdev_osc_tektronix_mso/__main__.py](epicsdev_osc_tektronix_mso/__main__.py)
 - OPI generator: [opi/generate_simplescope.py](opi/generate_simplescope.py)
 
@@ -9,7 +11,7 @@ EPICS PVAccess server for Tektronix oscilloscopes (MSO and DPO families), implem
 
 - VISA/SCPI connection to Tektronix instruments via TCP/IP or USB interfaces
 - Live waveform publishing over PVAccess
-- EPICS PVs reflects live oscilloscope parameters
+- EPICS PVs reflect live oscilloscope parameters
 - Per-channel control/readback:
 	- `cNNOnOff`, `cNNCoupling`, `cNNVoltsPerDiv`, `cNNOffset`, `cNNTermination`
 	- `cNNWaveform`, `cNNMean`, `cNNPeak2Peak`, `cNNRMS`
@@ -29,7 +31,7 @@ EPICS PVAccess server for Tektronix oscilloscopes (MSO and DPO families), implem
 
 ## Install
 
-- `pip install epicsdev_osc_tektronix_mso`
+- `pip install epicsdev_tektronix_mso`
 
 ## Run
 
@@ -56,13 +58,19 @@ Default PV prefix:
 
 ## OPI
 
-Generate a simple Phoebus screen:
+Generate a simple Phoebus screen automatically:
 
-- `python opi/generate_simplescope.py`
+- `python opi/generate_simplescope.py '$(DEV):'`
 
 Output:
 
 - [opi/simplescope.bob](opi/simplescope.bob)
+
+Notes:
+
+- The `prefix` argument defines widget PV names.
+- Default prefix is `$(DEV):`, intended for Phoebus macros.
+- If needed, install dependency: `pip install phoebusgen`.
 
 ## Notes
 
