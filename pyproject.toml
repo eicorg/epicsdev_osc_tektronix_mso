@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "epicsdev_tektronix"
-version = "2.0.1"
+name = "epicsdev_tektronix_mso"
+version = "3.0.2"
 authors = [
   { name="Andrey Sukhanov", email="sukhanov@bnl.gov" },
 ]
@@ -17,8 +17,8 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-  "p4p>=4.2.2", "epicsdev>=3.0.1"
+  "p4p>=4.2.2", "epicsdev>=3.0.1", "numpy", "pyvisa", "pyvisa-py"
 ]
 [project.urls]
-"Homepage" = "https://github.com/ASukhanov/epicsdev_tektronix"
-"Bug Tracker" = "https://github.com/ASukhanov/epicsdev_tektronix"
+"Homepage" = "https://github.com/eicorg/epicsdev_osc_tektronix_mso"
+"Bug Tracker" = "https://github.com/eicorg/epicsdev_osc_tektronix_mso"

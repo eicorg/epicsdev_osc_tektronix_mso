@@ -1,7 +1,8 @@
 """EPICS PVAccess server for Tektronix MSO oscilloscopes using epicsdev module."""
 # pylint: disable=invalid-name
-__version__ = 'v3.0.0 2026-09-09'# DPO series supported.
+__version__ = 'v3.0.2 2026-09-15'# Tested with TCPIP on MSO64 and USB on DPO2004B
 # Note, visa INSTR works more reliably than SOCKET, but waveform acquisition is ~10 times slower
+#TODO: Stop aqcquire during adopt_local_setting
 #TODO: Timing does not match for 0.3 s: cycleTime=2.0, acquire_wf=0.7, sleep=1.0
 import sys
 import time
@@ -27,6 +28,8 @@ ElapsedTime = {}
 NDIVSX = 10# number of horizontal divisions of the scope display
 NDIVSY = 10# number of vertical divisions
 BigEndian = False# Defined in configure_scope(WFMOUTPRE:BYT_Or LSB)
+MAX_CHANNELS = 8# maximum number of channels supported by the server
+#Lock = threading.Lock()# to block sending commands during waveform receiving. Note: this deterministic code and locking is not necessary, but it is safer to avoid sending commands while receiving waveforms. It may be removed in the future.
 #``````````````````PVs defined here```````````````````````````````````````````
 def myPVDefs():
     """PV definitions"""
@@ -39,6 +42,8 @@ def myPVDefs():
 ['visaResource', 'VISA resource to access the device', pargs.resource, {F:'R'}],
 ['scopeIDN', 'Response to *IDN? query', 'N/A', {}],
 ['dateTime',    'Scope`s date & time', 'N/A', {}],
+['acquire', 'Start/Stop acquisition', ['Start','Stop','Started','Stopped'],
+    {F:'WD', SET:set_acquire}],
 ['acqCount',    'Number of acquisition recorded', 0, {}],
 ['scopeAcqCount',  'Acquisition count of the scope', 0,{
     SCPI:'ACQuire:NUMACq'}],
@@ -49,38 +54,27 @@ def myPVDefs():
     SET:set_instrCmdS}],
 ['instrCmdR',   'Response of the instrCmdS',  '', {}],
 #``````````````````Horizontal PVs
-#TODO: DPO does not support HORizontal:MODE 
-['horzMode',    'Horizontal mode', ['AUTO','MANUAL'],{F:'WD',
-    SCPI:'HORizontal:MODE', SET:set_scpi}],
-['recLengthS',  'Number of points per waveform', 1000.,{F:'W',
+['recLengthS',  'Number of points per waveform', 1000.,{F:'W', U:'pts',
     SCPI:'HORizontal:RECOrdlength', SET:set_scpi, LL:1000, LH:10000000}],
-['recLengthR',  'Number of points per waveform read', 0.,{
-    SCPI:'HORizontal:RECOrdlength'}],
+['recLengthR',  'Number of points per waveform read', 0., {U:'pts'}],
 ['samplingRate', 'Sampling Rate',  0., {U:'Hz',
     SCPI:'HORizontal:SAMPLERate'}],
-['timePerDiv', f'Horizontal scale (1/{NDIVSX} of full scale)', 2.e-6, {F:'W', U:'S/du',
+['timePerDiv', f'Horizontal scale (1/{NDIVSX} of full scale)', 2.e-6, {F:'W', U:'S/div',
     SCPI: 'HORizontal:SCAle', SET:set_scpi}],
 ['tAxis',       'Horizontal axis array', [0.], {U:'S'}],
 
 #``````````````````Trigger PVs
 ['trigger',     'Click to force trigger event to occur',
     ['Trigger','Force!'], {F:'WD', SET:set_trigger}],
-['trigType',   'Trigger type',
-    ['EDGE','WIDTH','TIMEOUT','RUNT','WINDOW','LOGIC','SETHOLD','TRANSITION','BUS'],{F:'WD',
-    SCPI:'TRIGger:A:TYPE',SET:set_scpi}],
 ['trigCoupling',   'Trigger coupling', ['DC','HFREJ','LFREJ','NOISEREJ'],{F:'D',
     SCPI:'TRIGger:A:EDGE:COUPling'}],
 ['trigState',   'Current trigger status', '?',{
     SCPI:'TRIGger:STATE'}],
-['trigMode',   'Trigger mode', ['AUTO','NORMAL'],{F:'WD',
-    SCPI:'TRIGger:A:MODe',SET:set_scpi}],
 ['trigDelay',   'Horizontal delay time', 0., {U:'S',
     SCPI:'HORizontal:DELay:TIMe'}],
 ['trigSource', 'Trigger source',
     pargs.channelList+['LINE','AUX'],{F:'WD',
     SCPI:'TRIGger:A:EDGE:SOUrce',SET:set_scpi}],
-['trigSlope',  'Trigger slope', ['RISE','FALL','EITHER'],{F:'WD',
-    SCPI:'TRIGger:A:EDGE:SLOpe',SET:set_scpi}],
 ['trigLevel', 'Trigger level', 0., {F:'W', U:'V',SET:set_trigLevel}],
 #``````````````````Auxiliary PVs
 ['timing',  'Performance timing: trigger,waveforms,preamble,query,publish', [0.], {U:'S'}],
@@ -93,14 +87,16 @@ def myPVDefs():
     SCPI:'SELect:CH<n>', SET:set_scpi}],
 ['c<n>Coupling', 'Channel coupling', ['DC','AC','DCREJ'],{F:'WD',
     SCPI:'CH<n>:COUPling', SET:set_scpi}],
-['c<n>VoltsPerDiv',  'Vertical scale',  1E-3, {F:'W', U:'V/du',
+['c<n>VoltsPerDiv',  'Vertical scale',  1E-3, {F:'W', U:'V/div',
     SCPI:'CH<n>:SCAle', SET:set_scpi, LL:500E-6, LH:10.}],
-['c<n>Offset',  'Vertical offset',  0., {F:'W', U:'div',
-    SCPI:'CH<n>:OFFSet', SET:set_scpi, LL:-10., LH:10.}],
+['c<n>Offset',  'Vertical offset in display divisions',  0., {F:'W', U:'div',
+    #SCPI:'CH<n>:OFFSet', SET:set_scpi, LL:-10., LH:10.}],
+    LL:-10., LH:10.}],
 ['c<n>Termination', 'Input termination', '50.000', {F:'W', U:'Ohm',
     SCPI:'CH<n>:TERmination', SET:set_scpi}],
-['c<n>Waveform', 'Waveform array',           [0.], {U:'V'}],
+['c<n>Waveform', 'Waveform array in display divisions', [0.], {U:'div'}],
 ['c<n>Mean',     'Mean of the waveform',     0., {U:'V'}],
+['c<n>Min', 'Waveform minimum', 0., {U:'V'}],
 ['c<n>Peak2Peak','Peak-to-peak amplitude',   0., {U:'V'}],
 ['c<n>RMS', 'RMS of waveform', 0.0, {U: 'V'}],
     ]
@@ -116,6 +112,25 @@ def myPVDefs():
                ['0','1'],{F:'WD', SCPI:'ACTONEVent:ENable', SET:set_scpi}])
         pvDefs.append(['aOE_Limit',  'Limit of Action On Event saves', 80,{F:'W',
                 SCPI:'ACTONEVent:LIMITCount', SET:set_scpi}])
+        #TODO: DPO does not support HORizontal:MODE 
+        pvDefs.append(['horzMode',    'Horizontal mode', ['AUTO','MANUAL'],{F:'WD',
+            SCPI:'HORizontal:MODE', SET:set_scpi}])
+        pvDefs.append(['trigType',   'Trigger type',
+            ['EDGE','WIDTH','TIMEOUT','RUNT','WINDOW','LOGIC','SETHOLD','TRANSITION','BUS'],{F:'WD',
+            SCPI:'TRIGger:A:TYPE',SET:set_scpi}])
+        pvDefs.append(['trigMode',   'Trigger mode', ['AUTO','NORMAL'],{F:'WD',
+            SCPI:'TRIGger:A:MODe',SET:set_scpi}])
+        pvDefs.append(['trigSlope',  'Trigger slope', ['RISE','FALL','EITHER'],{F:'WD',
+            SCPI:'TRIGger:A:EDGE:SLOpe',SET:set_scpi}])
+
+    elif C_.scopeSeries == 'DPO':
+        pvDefs.append(['trigType',   'Trigger type',
+            ['EDG','WIDTH','TIMEOUT','RUNT','WINDOW','LOGIC','SETHOLD','TRANSITION'],{F:'WD',
+            SCPI:'TRIGger:A:TYPE',SET:set_scpi}])
+        pvDefs.append(['trigMode',   'Trigger mode', ['AUTO','NORM'],{F:'WD',
+            SCPI:'TRIGger:A:MODe',SET:set_scpi}])
+        pvDefs.append(['trigSlope',  'Trigger slope', ['RIS','FALL','EITHER'],{F:'WD',
+            SCPI:'TRIGger:A:EDGE:SLOpe',SET:set_scpi}])
     return pvDefs    
 #,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 @dataclass(slots=True)
@@ -134,28 +149,31 @@ class C_():
     channelsEnabled = []
     npoints = 0
     #ypars = None
-    ymult = []
-    yoff = []# not used
-    yzero = []
     scopeSeries = ''
+    prevXpreamble =  (0., 0., 0)# xincr, xzero, recLength
+    prevYpreamble = [(0., 0., 0., 1.)]*MAX_CHANNELS # yincr, yoffset, yzero, voltsPerDiv
 #``````````````````Setters````````````````````````````````````````````````````
 def scopeCmd(cmd):
-    """Send command to scope, return reply if any."""
-    print(f'>scopeCmd: {cmd}')
+    """Send blocking command to scope, return reply if any."""
+    printv(f'>scopeCmd: {cmd}')
     reply = None
     try:
-        if cmd[-1] == '?':
-            reply = C_.scope.query(cmd)
-        else:
-            C_.scope.write(cmd)
-    except:
-        handle_exception(f'in scopeCmd{cmd}')
+        if True:# with Lock:
+            if cmd[-1] == '?':
+                reply = C_.scope.query(cmd)
+            else:
+                C_.scope.write(cmd)
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        handle_exception(f'in scopeCmd: {cmd}')
     return reply
 
 def set_instrCmdS(cmd, *_):
     """Setter for the instrCmdS PV"""
     publish('instrCmdR','')
     reply = scopeCmd(cmd)
+    printv(f'set_instrCmdS: reply={reply}')
     if reply is not None:
         publish('instrCmdR',reply)
     publish('instrCmdS',cmd)
@@ -166,7 +184,7 @@ def serverStateChanged(newState:str):
         printi('start_device called')
         configure_scope()
         adopt_local_setting()
-        C_.scope.write(':RUN')
+        scopeCmd(':RUN')
     elif newState == 'Stop':
         printi('stop_device called')
     elif newState == 'Clear':
@@ -179,9 +197,10 @@ def set_setup(action_slot, *_):
     action,slot = str(action_slot).split()
     filename = 'oper.set' if 'oper' in slot else 'latest.set'
     print(f'set_setup: {action}')
+    _acquire('Stop')
     if action == 'Save':
         status = 'Setup was saved'
-        C_.scope.write(f"SAVE:SETUP 'c:/{filename}'")
+        scopeCmd(f"SAVE:SETUP 'c:/{filename}'")
         printi(status)
     elif action == 'Recall':
         status = 'Setup was recalled'
@@ -189,7 +208,7 @@ def set_setup(action_slot, *_):
             printw('Please set server to Stop before Recalling')
             publish('setup','Setup')
             return NotOK
-        C_.scope.write(f"RECAll:SETUp 'c:/{filename}'")
+        scopeCmd(f"RECAll:SETUp 'c:/{filename}'")
         printi(status)
     else:
         status = f'Wrong setup action: {action}'
@@ -197,26 +216,28 @@ def set_setup(action_slot, *_):
     publish('setup','Setup')
     if action == 'Recall':
         adopt_local_setting()
+    _acquire('Start')
     return OK
 
 def set_trigger(value, *_):
     """setter for the trigger PV"""
     printv(f'set_trigger: {value}')
     if str(value) == 'Force!':
-        C_.scope.write('TRIGger FORCe')
+        scopeCmd('TRIGger FORCe')
         publish('trigger','Trigger')
 
 def set_trigLevel(value, *_):
     """setter for the trigLevel PV"""
     printv(f'set_trigLevel: {value}')
-    C_.scope.write(trigLevelCmd() + f' {value}')
-    value = C_.scope.query(trigLevelCmd() + '?')
-    publish('trigLevel', value)
+    if (cmd := trigLevelCmd()):
+        scopeCmd(cmd + f' {value}')
+        value = C_.scope.query(cmd + '?')
+        publish('trigLevel', value)
 
 def set_recLengthS(value, *_):
     """setter for the recLengthS PV"""
     printv(f'set_recLengthS: {value}')
-    C_.scope.write(f'HORizontal:RECOrdlength {value}')
+    scopeCmd(f'HORizontal:RECOrdlength {value}')
     publish('recLengthS', value)
 
 def set_scpi(value, pv, *_):
@@ -231,12 +252,21 @@ def set_scpi(value, pv, *_):
     scpi += f' {value}'
     if pv.name == 'recLengthS':
         scpi = f':HORizontal:MODE MANUAL;:{scpi}'
-        print(f'setting recLengthS: {scpi}')
+        printv(f'setting recLengthS: {scpi}')
     printv(f'set_scpi command: {scpi}')
     reply = scopeCmd(scpi)
     if reply is not None:
         publish(pv.name, reply)
     publish(pv.name, value)
+
+def set_acquire(value, *_):
+    """setter for the acquire PV"""
+    if str(value) == 'Start':
+        _acquire('Start')
+        publish('acquire','Started')
+    elif str(value) == 'Stop':
+        _acquire('Stop')
+        publish('acquire','Stopped')
 
 #``````````````````Instrument communication functions`````````````````````````
 def query(pvnames, explicitSCPIs=None):
@@ -246,7 +276,8 @@ def query(pvnames, explicitSCPIs=None):
         scpis += explicitSCPIs
     combinedScpi = '?;:'.join(scpis) + '?'
     #print(f'combinedScpi: {combinedScpi}')
-    r = C_.scope.query(combinedScpi)
+    if True:# with Lock:
+        r = C_.scope.query(combinedScpi)
     #print(f'query result: {r}')
     return r.split(';')
 
@@ -254,13 +285,25 @@ def configure_scope():
     """Send commands to configure data transfer"""
     printi('configure_scope')
     # Configure waveform data transfer for Tektronix
-    C_.scope.write('HORizontal:DELay:MODe ON')
-    C_.scope.write('HORizontal:MODE MANual')
-    C_.scope.write('HORizontal:MODE:MANual:CONFIGure HORIZontalscale')
-    C_.scope.write((  ':WFMOUTPRE:ENCdg BINARY;'
+    scopeCmd('HORizontal:DELay:MODe ON')
+    scopeCmd('HORizontal:MODE MANual')
+    scopeCmd('HORizontal:MODE:MANual:CONFIGure HORIZontalscale')
+    scopeCmd((  ':WFMOUTPRE:ENCdg BINARY;'
                     ':WFMOUTPRE:BN_Fmt RI;'
                     ':WFMOUTPRE:BYT_NR 2;'
-                    f':WFMOUTPRE:BYT_Or LSB;'))
+                    ':WFMOUTPRE:BYT_Or LSB;'))
+
+def refresh_channelsEnabled():
+    """Refresh list of channels to read."""
+    C_.channelsEnabled = []
+    printv(f'Checking channels for {pargs.channels} available channels')
+    for ch in range(pargs.channels):
+        onoff = query([f'c{ch+1:02d}OnOff'])[0]
+        #print(f'Channel {ch+1} OnOff: {onoff}')
+        if onoff in ('1', 'ON', 'TRUE'):
+            C_.channelsEnabled.append(f'CH{ch+1}')
+        publish(f'c{ch+1:02d}OnOff', onoff, IF_CHANGED)
+    printv(f'Channels enabled: {C_.channelsEnabled}')
 
 def update_scopeParameters():
     """Update sensitive scope parameters"""
@@ -268,46 +311,46 @@ def update_scopeParameters():
     #r = query(['horzMode'])
     #publish('horzMode', r[0], IF_CHANGED)
     refresh_channelsEnabled()  # Refresh the list of enabled channels
+
+    # Query vertical parameters for each enabled channel
     for ch in C_.channelsEnabled:
         printv(f'Updating scope parameters for {ch}')
-        C_.scope.write(f'DATA:SOURCE {ch}')
+        scopeCmd(f'DATA:SOURCE {ch}')
         ich = int(ch[2])-1
-        r = C_.scope.query('WFMOutpre:YMUlt?;:WFMOutpre:YOFf?;:WFMOutpre:YZEro?').split(';')
-        C_.ymult[ich] = float(r[0])
-        C_.yoff[ich] = float(r[1])
-        C_.yzero[ich] = float(r[2])
-        print(f'Channel {ich}: YMULT={C_.ymult[ich]}, YOFF={C_.yoff[ich]}, YZERO={C_.yzero[ich]}')
+        r = scopeCmd(
+            f'WFMOutpre:YMUlt?;:WFMOutpre:YOFf?;:WFMOutpre:YZEro?;:{ch}:SCAle?').split(';')
+        if len(r) != 4:
+            printe(f'Unexpected number of vertical parameters for {ch}: {r}')
+            continue
+        #print(f'Vertical parameters query result for {ch}: {r}')
+        ypreamble = tuple([float(i) for i in r])
+        if ypreamble != C_.prevYpreamble[ich]:
+            printi(f'Scope vertical parameters changed for {ch}: {ypreamble}')
+            C_.prevYpreamble[ich] = ypreamble
+            publish(f'c{ich+1:02d}VoltsPerDiv', ypreamble[3], IF_CHANGED)
+            #publish(f'c{ich+1:02d}Offset', ypreamble[2], IF_CHANGED)
 
     # Query horizontal parameters
-    #print('Querying horizontal parameters...')
-
-    r = C_.scope.query('WFMOutpre:XINcr?;:WFMOutpre:XZEro?;:WFMOutpre:NR_Pt?').split(';')
+    r = scopeCmd('WFMOutpre:XINcr?;:WFMOutpre:XZEro?;:WFMOutpre:NR_Pt?;:ACQ:STATE?').split(';')
     #print(f'Horizontal parameters query result: {r}')
     xincr = float(r[0])
     xzero = float(r[1])
-    npoints = int(r[2])
-    
-    # Query channel states
-    ch_states = []
-    for ch in range(1, pargs.channels+1):
-        #state = C_.scope.query(f"CH{ch}:STATE?")
-        #ch_states.append(state.strip())
-        ch_states.append('1')
-    
-    currentScopeParameters = f'{xincr:.6g};{npoints};' + ';'.join(ch_states)
-    #print(f'Current scope parameters: {currentScopeParameters}')
-    
-    if currentScopeParameters != C_.previousScopeParametersQuery:
-        printi(f'Scope parameters changed dx,n: {currentScopeParameters}')
-        xorigin = xzero
-        xincrement = xincr
-        C_.npoints = npoints
-        taxis = np.arange(0, C_.npoints) * xincrement + xorigin
+    C_.npoints = int(r[2])
+    acq_state_str = 'Started' if r[3] == '1' else 'Stopped'
+    acq_prev = str(pvv('acquire'))
+    if acq_state_str != acq_prev:# IF_CHANGED does not work for enums in epicsdev 330
+        #print(f'Acquisition state changed: {acq_state_str, acq_prev}')
+        publish('acquire', acq_state_str, IF_CHANGED)
+    xpreamble = (xincr, xzero, C_.npoints)
+    if xpreamble != C_.prevXpreamble:
+        printi(f'Horizontal scope parameters changed: {xpreamble}')
+        taxis = np.arange(0, C_.npoints) * xincr + xzero
+        #print(f'taxis: {taxis[0],taxis[-1]}')
+        C_.prevXpreamble = xpreamble
         publish('tAxis', taxis)
         publish('recLengthR', C_.npoints, IF_CHANGED)
-        publish('timePerDiv', C_.npoints*xincrement/NDIVSX, IF_CHANGED)
-        publish('samplingRate', 1./xincrement, IF_CHANGED)
-    C_.previousScopeParametersQuery = currentScopeParameters
+        publish('timePerDiv', C_.npoints*xincr/NDIVSX, IF_CHANGED)
+        publish('samplingRate', 1./xincr, IF_CHANGED)
 
 def init_visa():
     '''Init VISA interface to device'''
@@ -343,9 +386,11 @@ def init_visa():
     try:
         C_.idn = C_.scope.query('*IDN?')
     except Exception as e:
-        printe(f"An error occurred during IDN query: {e}")
+        print(f"ERROR: occurred during IDN query: {e}")
         if 'SOCKET' in resourceName:
             print('You may need to disable VXI server on the instrument.')
+        else:
+            print('You may need to power cycle the instrument')
         sys.exit(1)
     print(f'IDN: {C_.idn}')
     if not 'TEKTRONIX' in C_.idn.upper():
@@ -378,15 +423,18 @@ def handle_exception(where):
     msg = tokens[0] if tokens[0] == 'VI_ERROR_TMO' else exceptionText
     msg = msg+': '+where
     printw(msg)
-    C_.scope.write('*CLS')
+    if True:# with Lock:
+        C_.scope.write('*CLS')
     return -1
 
 def adopt_local_setting():
-    """Read scope setting and update PVs"""
+    """Read scope setting and update PVs."""
+    printi('adopt_local_setting: reading scope settings...')
     nothingChanged = True
-    try:
-        printv(f"adopt_local_setting: readSettingQuery: {C_.readSettingQuery}")
-        values = C_.scope.query(C_.readSettingQuery).split(';')
+    if True:#try:
+        #print(f"adopt_local_setting: readSettingQuery: {C_.readSettingQuery}")
+        if True:# with Lock:
+            values = C_.scope.query(C_.readSettingQuery).split(';')
         printvv(f'parnames[{len(C_.scpi)}]: {C_.scpi.keys()}')
         printvv(f'values[{len(values)}]: {values}')
         if len(C_.scpi) != len(values):
@@ -396,37 +444,28 @@ def adopt_local_setting():
             printe(f'adopt_local_setting failed for {list(C_.scpi.keys())[l]}')
             sys.exit(1)
         for parname,v in zip(C_.scpi, values):
+            print(f'adopt_local_setting: {parname}={v}')
             publish(parname, v, IF_CHANGED)
         # special case of TrigLevel
-        value = C_.scope.query(trigLevelCmd()+'?')
-        publish('trigLevel', value, IF_CHANGED)
-    except:
+        if True:# with Lock:
+            if (cmd := trigLevelCmd()):
+                value = C_.scope.query(cmd  +'?')
+                publish('trigLevel', value, IF_CHANGED)
+    else:#except:
         handle_exception(f'in adopt_local_setting {parname}={v}')
         return
     if nothingChanged:
         printi('Local setting did not change.')
 
-def refresh_channelsEnabled():
-    """Refresh list of channels to read."""
-    C_.channelsEnabled = []
-    printv(f'Checking channels for {pargs.channels} available channels')
-    for ch in range(pargs.channels):
-        onoff = query([f'c{ch+1:02d}OnOff'])[0]
-        #print(f'Channel {ch+1} OnOff: {onoff}')
-        if onoff in ('1', 'ON', 'TRUE'):
-            C_.channelsEnabled.append(f'CH{ch+1}')
-        publish(f'c{ch+1:02d}OnOff', onoff, IF_CHANGED)
-    printv(f'Channels enabled: {C_.channelsEnabled}')
-
 #,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
 #``````````````````Acquisition-related functions`````````````````````````````````
 def trigger_is_detected():
     """check if scope was triggered"""
-    printv('Checking if trigger is detected...')
+    #print('Checking if trigger is detected...')
     ts = timer()
     try:
-        r = query(['trigState','scopeAcqCount','recLengthR',
-                    'timePerDiv'], ['DATa:SOUrce:AVAILable'])
+        r = query(['trigState','scopeAcqCount'],
+                    ['DATa:SOUrce:AVAILable'])
         #print(f'Result of query: {r}')
     except visa.errors.VisaIOError as e:
         printe(f'Exception in query for trigger: {e}')
@@ -445,12 +484,17 @@ def trigger_is_detected():
     for i in C_.exceptionCount:
         C_.exceptionCount[i] = 0
     try:
-        trigstate,numacq,rl,timePerDiv = r#,channelsEnabled = r
+        trigstate,numacq,*_ = r#,channelsEnabled = r
     except Exception as e:
         printw(f'wrong trig info: {r}, exception:{e}')
         return False
+    #print(f'trigger_is_detected: trigState={trigstate}, numacq={numacq}')
+    if not trigstate.startswith('TRIG'):
+        #printw(f'Unexpected trigger state: {trigstate}')
+        return False
 
     numacq = int(numacq)
+    #print(f'Trigger check: trigState={trigstate}, numacq={numacq}, recLengthR={rl}, timePerDiv={timePerDiv}')
     if numacq == 0 or C_.numacq == 0:
         C_.triggersLost = 0
     else:
@@ -460,15 +504,15 @@ def trigger_is_detected():
         if numacq == C_.numacq:
             publish('status',f'WAR: Scope not acquiring. numacq={numacq}, C_.numacq={C_.numacq}')
         else:
-            printw(f'Scope acquisition count was reset. Something changed in the scope settings.')
+            printw('Scope acquisition count was reset. Something changed in the scope settings.')
         C_.numacq = numacq
         return False
 
     # trigger detected
+    #print(f'Trigger detected: trigState={trigstate}, numacq={numacq}, recLengthR={rl}, timePerDiv={timePerDiv}')
     C_.numacq = numacq
     C_.trigTime = time.time()
-    d = {'recLengthR': int(rl), 'timePerDiv': float(timePerDiv),
-         'trigState':trigstate}
+    d = {'trigState':trigstate}
     for pvname,value in d.items():
         publish(pvname, value, IF_CHANGED, t=C_.trigTime)
     ElapsedTime['trigger_detection'] = round(timer()-ts,6)
@@ -479,14 +523,24 @@ def trigLevelCmd():
     """Generate SCPI command for trigger level control"""
     ch = str(pvv('trigSource'))
     if ch[:2] != 'CH':
-        return ''
+        return None
     r = 'TRIGger:A:LEVel:'+ch
-    printv(f'tlcmd: {r}')
+    #print(f'tlcmd: {r}')
     return r
 
 #``````````````````Acquisition-related functions``````````````````````````````
+def _acquire(startStop = 'Start'):
+    """Start or stop acquisition"""
+    if startStop == 'Stop':
+        C_.scope.write(':ACQuire:STATE STOP')
+        #printi('Acquisition stopped')
+    else:
+        C_.scope.write(':ACQuire:STATE RUN')
+        #printi('Acquisition started')
+
 def acquire_waveforms():
     """Acquire waveforms from the device and publish them."""
+    #_acquire('Stop')  # Stop acquisition to ensure we get the latest data
     refresh_channelsEnabled()
     channels = C_.channelsEnabled
     printv(f'>acquire_waveform for channels {channels}')
@@ -504,13 +558,8 @@ def acquire_waveforms():
         ts = timer()
         operation = 'getting preamble'
         try:
-            C_.scope.write(f'DATa:SOUrce CH{ch}')
-            # Get waveform parameters
-            # This section is 4 times longer than the waveform acquisition
-            #TODO: do this in periodic_update
-            # ymult = float(C_.scope.query('WFMOutpre:YMUlt?'))
-            # yoff = float(C_.scope.query('WFMOutpre:YOFf?'))
-            # yzero = float(C_.scope.query('WFMOutpre:YZEro?'))
+            if True:# with Lock:
+                C_.scope.write(f'DATa:SOUrce CH{ch}')
             dt = timer() - ts
             ts = timer()
             #printvv(f'aw preamble{ch}: ymult={C_.ymult[ch]}, yoff={C_.yoff[ch]}, yzero={C_.yzero[ch]}, dt: {dt}')
@@ -518,20 +567,11 @@ def acquire_waveforms():
 
             # acquire the waveform
             operation = 'getting waveform'
-            # with Threadlock: This is 4 times longer than the query_binary_values
-            #     C_.scope.write('CURVe?')
-            #     # Read binary data
-            #     waveform = C_.scope.read_raw()
-            #     # Parse Tektronix binary format
-            #     # Format: #<x><yyy><data>
-            #     # where x is number of digits in yyy, yyy is number of bytes
-            #     header_len = 2 + int(chr(waveform[1]))
-            #     data_bytes = waveform[header_len:-1]  # Skip header and terminator
-            #     waveform_data = np.frombuffer(data_bytes, dtype=np.int16)
             try:
-                bin_wave = C_.scope.query_binary_values('curve?',
-                    datatype='h', is_big_endian=BigEndian,
-                    container=np.array)
+                if True:# with Lock:
+                    bin_wave = C_.scope.query_binary_values('curve?',
+                        datatype='h', is_big_endian=BigEndian,
+                        container=np.array)
             except Exception as e:
                 printe(f'in query_binary_values: {e}')
                 break
@@ -539,18 +579,20 @@ def acquire_waveforms():
             ts = timer()
 
             # Convert to vertical divisions
-            #v = (waveform_data - yoff) * ymult + yzero
-            print(f'Channel {ch}: YMULT={C_.ymult[ch]}, YOFF={C_.yoff[ch]}, YZERO={C_.yzero[ch]}')
-            v = bin_wave*C_.ymult[ch] + C_.yzero[ch]
-            v = v/pvv(f'c{ch:02}VoltsPerDiv')
+            yincr, yoffset, yzero, voltsPerDiv = C_.prevYpreamble[ch-1]
+            printv(f'Channel {ch}: yincr={yincr}, yoffset={yoffset}, yzero={yzero}, voltsPerDiv={voltsPerDiv}')
+            samplesv = (bin_wave - yoffset) * yincr + yzero# Convert to volts
+            printv(f'max,min: {samplesv.max(),samplesv.min()}')
+            voffset = pvv(f'c{ch:02}Offset')
+            samplesd = (samplesv/voltsPerDiv + voffset).astype(np.float32)  # Convert to divisions
 
             # publish
             operation = 'publishing'
-            publish(f'c{ch:02}Waveform', v, t=C_.trigTime)
-            publish(f'c{ch:02}Peak2Peak', np.ptp(v), t=C_.trigTime)
-            publish(f'c{ch:02}Mean', np.mean(v), t=C_.trigTime)
-            publish(f'c{ch:02d}RMS', float(np.std(v)), t=C_.trigTime)
-            publish(f'c{ch:02d}Offset', 0., t=C_.trigTime, ifChanged=True)
+            publish(f'c{ch:02}Waveform', samplesd, t=C_.trigTime)
+            publish(f'c{ch:02}Peak2Peak', np.ptp(samplesv), t=C_.trigTime)
+            publish(f'c{ch:02}Mean', np.mean(samplesv), t=C_.trigTime)
+            publish(f'c{ch:02d}RMS', float(np.std(samplesv)), t=C_.trigTime)
+            publish(f'c{ch:02d}Min', float(np.min(samplesv)), t=C_.trigTime)
         except visa.errors.VisaIOError as e:
             printe(f'Visa exception in {operation} for {ch}:{e}')
             break
@@ -558,7 +600,8 @@ def acquire_waveforms():
             printe(f'Exception in processing channel {ch}: {e}')
         ElapsedTime['publish_wf'] += timer() - ts
     ElapsedTime['acquire_wf'] = timer() - ElapsedTime['acquire_wf']
-    printvv(f'elapsedTime: {ElapsedTime}')
+    #print(f'elapsedTime: {ElapsedTime}')
+    #_acquire('Start')  # Restart acquisition after reading waveforms
 
 def make_readSettingQuery():
     """Create combined SCPI query to read all settings at once"""
@@ -592,35 +635,32 @@ def make_readSettingQuery():
 def init():
     """Module initialization"""
     publish('scopeIDN', C_.idn)
-    C_.ymult = [0.]*(pargs.channels+1)
-    C_.yzero = [0.]*(pargs.channels+1)
-    C_.yoff = [0.]*(pargs.channels+1)
     make_readSettingQuery()
-    #adopt_local_setting()
-    update_scopeParameters()
-    #publish('version', __version__)
+    adopt_local_setting()
+    _acquire('Start')
 
 def periodicUpdate():
     """Called for infrequent updates"""
-    printvv(f'periodicUpdate')
+    printv('>periodicUpdate')
     try:
         update_scopeParameters()
-    except:
-        handle_exception('in update_scopeParameters')
-    r = C_.scope.query(':DATE?;:TIMe?').split(';')
-    # the dateTime is here, because it is dual command
-    dt = ' '.join(r[1:3]).replace('"','')
-    #print(f'dateTime: {dt}, {r}')
-    publish('dateTime', dt)
-    publish('scopeAcqCount', C_.numacq, IF_CHANGED)
-    publish('lostTrigs', C_.triggersLost, IF_CHANGED)
-    #publish('actOnEvent', r[0], IF_CHANGED)
-    if 'STOP' in str(pvv('trigState')).upper():
-        printe('Acquisition is stopped')
-    publish('timing', [(round(i,6)) for i in ElapsedTime.values()])
+        r = scopeCmd(':DATE?;:TIMe?;:ACQ:STATE?').split(';')
+        dt = ' '.join(r[1:2]).replace('"','')
+        #print(f'dateTime: {dt}, {r}')
+        publish('dateTime', dt)
+        publish('scopeAcqCount', C_.numacq, IF_CHANGED)
+        publish('lostTrigs', C_.triggersLost, IF_CHANGED)
+        #publish('actOnEvent', r[0], IF_CHANGED)
+        if r[2] != '0':# Acquisition not stopped
+            publish('timing', [(round(i,6)) for i in ElapsedTime.values()])
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        handle_exception('in periodic_update')
+    printv('<periodicUpdate')
 
 def poll():
-    """Example of polling function"""
+    """Instrument polling function"""
     if trigger_is_detected():
         acquire_waveforms()
 
@@ -650,10 +690,10 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='count', default=0, help=
     'Show more log messages (-vv: show even more)') 
     pargs = parser.parse_args()
-    print(f'pargs: {pargs}')
+    printv(f'pargs: {pargs}')
 
     init_visa()  # Initialize VISA and determine the number of channels if not provided
-    print(f'Number of channels determined: {pargs.channels}')
+    printi(f'Number of channels determined: {pargs.channels}')
     pargs.channelList = [f'CH{i+1}' for i in range(pargs.channels)]
 
     # Initialize epicsdev and PVs
@@ -672,12 +712,16 @@ if __name__ == "__main__":
     # Main loop with Server
     server = Server(providers=[PVs])
     printi(f'Server for {pargs.prefix} started...')
-    while True:
-        state = serverState()
-        if state.startswith('Exit'):
-            break
-        if not state.startswith('Stop'):
-            poll()
-        if not sleep():
-            periodicUpdate()
+    try:
+        while True:
+            state = serverState()
+            if state.startswith('Exit'):
+                break
+            if not state.startswith('Stop'):
+                poll()
+            if not sleep():
+                periodicUpdate()
+    except KeyboardInterrupt:
+        printi('Keyboard interrupt received, exiting main loop...')
+        set_server('Exit')
     printi('Server is exited')
