@@ -1,6 +1,6 @@
 """EPICS PVAccess server for Tektronix MSO oscilloscopes using epicsdev module."""
 # pylint: disable=invalid-name
-__version__ = 'v3.0.2 2026-09-15'# Tested with TCPIP on MSO64 and USB on DPO2004B
+__version__ = 'v3.0.3 2026-09-16'# Error handling of USB interface failures.
 # Note, visa INSTR works more reliably than SOCKET, but waveform acquisition is ~10 times slower
 #TODO: Stop aqcquire during adopt_local_setting
 #TODO: Timing does not match for 0.3 s: cycleTime=2.0, acquire_wf=0.7, sleep=1.0
@@ -137,6 +137,7 @@ def myPVDefs():
 class C_():
     """Namespace for module properties"""
     scope = None
+    resourceName = '?'
     scpi = {}# {pvName:SCPI} map
     setterMap = {}
     PvDefs = []
@@ -360,15 +361,15 @@ def init_visa():
         printe(f'in visa.ResourceManager: {e}')
         sys.exit(1)
 
-    resourceName = pargs.resource.upper()
-    printv(f'Opening resource {resourceName}')
+    C_.resourceName = pargs.resource.upper()
+    printv(f'Opening resource {C_.resourceName}')
     try:
-        C_.scope = rm.open_resource(resourceName)#, open_timeout=5000)
+        C_.scope = rm.open_resource(C_.resourceName)#, open_timeout=5000)
     except visa.errors.VisaIOError as e:
-        printe(f'Could not open resource {resourceName}: {e}')
+        printe(f'Could not open resource {C_.resourceName}: {e}')
         sys.exit(1)
     except Exception as e:
-        print(f'ERROR: Exception: Could not open resource {resourceName}: {e}')
+        print(f'ERROR: Exception: Could not open resource {C_.resourceName}: {e}')
         availableResources = rm.list_resources()
         print(f'Available resources: {availableResources}')
         sys.exit(1)
@@ -381,16 +382,14 @@ def init_visa():
     try:
         C_.scope.write('*CLS') # clear ESR, previous error messages will be cleared
     except Exception as e:
-        print(f'ERROR:Resource {resourceName} not responding: {e}')
+        print(f'ERROR:Resource {C_.resourceName} not responding: {e}')
+        interface_error()
         sys.exit()
     try:
         C_.idn = C_.scope.query('*IDN?')
     except Exception as e:
         print(f"ERROR: occurred during IDN query: {e}")
-        if 'SOCKET' in resourceName:
-            print('You may need to disable VXI server on the instrument.')
-        else:
-            print('You may need to power cycle the instrument')
+        interface_error()
         sys.exit(1)
     print(f'IDN: {C_.idn}')
     if not 'TEKTRONIX' in C_.idn.upper():
@@ -427,6 +426,13 @@ def handle_exception(where):
         C_.scope.write('*CLS')
     return -1
 
+def interface_error():
+    if 'TCPIP' in C_.resourceName:
+        print('You may need to disable VXI server on the instrument.')
+    elif 'USB' in C_.resourceName:
+        print('You may need to reset USB connection on the instrument as described here:')
+        print('https://github.com/eicorg/epicsdev_osc_tektronix_mso/blob/main/docs/How_to_reset_USB_controller.md')
+
 def adopt_local_setting():
     """Read scope setting and update PVs."""
     printi('adopt_local_setting: reading scope settings...')
@@ -444,7 +450,7 @@ def adopt_local_setting():
             printe(f'adopt_local_setting failed for {list(C_.scpi.keys())[l]}')
             sys.exit(1)
         for parname,v in zip(C_.scpi, values):
-            print(f'adopt_local_setting: {parname}={v}')
+            #print(f'adopt_local_setting: {parname}={v}')
             publish(parname, v, IF_CHANGED)
         # special case of TrigLevel
         if True:# with Lock:
