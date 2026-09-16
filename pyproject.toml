@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "epicsdev_tektronix_mso"
+name = "epicsdev_osc_tektronix_mso"
 version = "3.0.3"
 authors = [
   { name="Andrey Sukhanov", email="sukhanov@bnl.gov" },
