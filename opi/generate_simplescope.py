@@ -1,5 +1,5 @@
-"""Generate a simple Phoebus screen for Keysight DSO-X PVs."""
-__version__ = 'v0.0.3 2026-09-14'# Min added
+"""Generate a simple Phoebus screen for epicsdev-based oscilloscopes"""
+__version__ = 'v3.0.3 2026-09-16'# Min added, better row spacing.
 
 import argparse
 from pathlib import Path
