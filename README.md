@@ -1,78 +1,74 @@
 # epicsdev_osc_tektronix_mso
 
-EPICS PVAccess server for Tektronix oscilloscopes (MSO and DPO families), implemented with `epicsdev`.
+An EPICS PVAccess server for Tektronix MSO and DPO oscilloscopes, built with [`epicsdev`](https://pypi.org/project/epicsdev/).
 
-Tested with TCPIP interface on MSO64B and USB interface on DPO2004B.
+<img src="docs/screenshot.jpg" alt="Phoebus oscilloscope screen" width="50%">
 
-- Main server module: [epicsdev_osc_tektronix_mso/__main__.py](epicsdev_osc_tektronix_mso/__main__.py)
-- OPI generator: [opi/generate_simplescope.py](opi/generate_simplescope.py)
+Tested with:
+
+* Tektronix MSO64B over TCP/IP
+* Tektronix DPO2004B over USB
 
 ## Features
 
-- VISA/SCPI connection to Tektronix instruments via TCP/IP or USB interfaces
-- Live waveform publishing over PVAccess
-- EPICS PVs reflect live oscilloscope parameters
-- Per-channel control/readback:
-	- `cNNOnOff`, `cNNCoupling`, `cNNVoltsPerDiv`, `cNNOffset`, `cNNTermination`
-	- `cNNWaveform`, `cNNMean`, `cNNPeak2Peak`, `cNNRMS`
-- Scope-level PVs:
-	- `timePerDiv`, `recLengthS`, `recLengthR`, `samplingRate`, `tAxis`
-	- `trigType`, `trigMode`, `trigSource`, `trigSlope`, `trigLevel`, `trigState`, `trigger`
-	- `setup`, `instrCmdS`, `instrCmdR`, `acqCount`, `lostTrigs`, `timing`
-- Model-aware channel count (when `--channels` is not provided)
+* TCP/IP, USB, and GPIB connectivity through VISA
+* Per-channel control and readback of key oscilloscope parameters
+* Model-aware setup, including automatic channel-count handling
+* Included generator for a basic Phoebus operator screen
+
+## Performance
+
+Measured waveform-transfer performance:
+
+| Oscilloscope | Connection    |                     Throughput |
+| ------------ | ------------- | -----------------------------: |
+| MSO64B       | TCP/IP SOCKET | ~1 million `float32` samples/s |
+| DPO2004B     | USB           |    ~80,000 `float32` samples/s |
+
+Actual performance depends on the instrument, VISA backend, network, and waveform settings.
 
 ## Requirements
 
-- Python 3.11+
-- `p4p>=4.2.2`
-- `epicsdev>=3.0.1`
-- `numpy`
-- `pyvisa` + a VISA backend (for example `pyvisa-py`)
+Python 3.11 or later, `p4p>=4.2.2`, `epicsdev>=3.0.1`, `numpy`, `pyvisa` and a compatible VISA backend, such as `pyvisa-py`.
 
-## Install
+## Installation
 
-- `pip install epicsdev_tektronix_mso`
+```bash
+pip install epicsdev_osc_tektronix_mso
+```
 
-## Run
+## Running the server
 
-- `python -m epicsdev_osc_tektronix_mso`
+Start the server with a VISA resource string:
 
-Example:
+```bash
+python -m epicsdev_osc_tektronix_mso -r 'TCPIP::192.168.1.1::4000::SOCKET'
+```
 
-- `python -m epicsdev_osc_tektronix_mso -r TCPIP::192.168.1.100::5025::SOCKET -d tektronix -i 0 -v`
+The default EPICS PV prefix will be: `tektronix0:`
 
-Default PV prefix:
+## Phoebus OPI
 
-- `tektronix0:`
+Generate a simple Phoebus oscilloscope screen:
 
-## Command-line options
+```bash
+cd opi
+python generate_simplescope.py -t txMSO1 pva://tektronix0:
+```
 
-- `-a, --autosave` autosave control (optional argument)
-- `-c, --recall` disable restore from autosave cache
-- `-C, --channels` number of channels (auto-detected when omitted)
-- `-d, --device` PV prefix device root (default: `tektronix`)
-- `-i, --index` PV prefix index (default: `0`)
-- `-r, --resource` VISA resource (default: `TCPIP::192.168.1.100::5025::SOCKET`)
-- `-p, --putlogPV` PV used for put logging (default: `putlog:dump`)
-- `-v, --verbose` increase verbosity (`-vv` for more)
-
-## OPI
-
-Generate a simple Phoebus screen automatically:
-
-- `python opi/generate_simplescope.py '$(DEV):'`
-
-Output:
-
-- [opi/simplescope.bob](opi/simplescope.bob)
+This creates [`opi/simplescope.bob`](opi/simplescope.bob).
 
 Notes:
 
-- The `prefix` argument defines widget PV names.
-- Default prefix is `$(DEV):`, intended for Phoebus macros.
-- If needed, install dependency: `pip install phoebusgen`.
+* The `prefix` argument determines the PV names used by widgets.
+* The default prefix is `$(DEV):`, allowing the screen to use Phoebus macros.
+* Install the optional generator dependency if needed:
 
-## Notes
+  ```bash
+  pip install phoebusgen
+  ```
 
-- `INSTR` VISA endpoints are usually more reliable; `SOCKET` can be faster for large waveform transfers.
-- Refer to [docs/README.md](docs/README.md) and [docs/IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md) for implementation details.
+## Connection notes
+
+* For TCP/IP, VISA `INSTR` resources are typically more reliable; `SOCKET` resources can provide faster large-waveform transfers.
+* USB connections can be slow and less reliable on older instruments.
