@@ -17,12 +17,13 @@ Tested with:
 * Included generator for a basic Phoebus operator screen
 
 ## Performance
+Details [here](docs/Performance.md).
 
 Measured waveform-transfer performance:
 
 | Oscilloscope | Connection    |                     Throughput |
 | ------------ | ------------- | -----------------------------: |
-| MSO64B       | TCP/IP SOCKET | ~1 million `float32` samples/s |
+| MSO64B       | TCP/IP SOCKET | ~1.3 million `float32` samples/s |
 | DPO2004B     | USB           |    ~80,000 `float32` samples/s |
 
 Actual performance depends on the instrument, VISA backend, network, and waveform settings.

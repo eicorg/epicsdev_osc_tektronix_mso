@@ -1,6 +1,6 @@
 """EPICS PVAccess server for Tektronix MSO oscilloscopes using epicsdev module."""
 # pylint: disable=invalid-name
-__version__ = 'v3.0.3 2026-09-16'# Error handling of USB interface failures.
+__version__ = 'v3.0.4 2026-09-17'# Triger is sensed from change in acq counter. Verbose printing corrected. __stopStart option
 # Note, visa INSTR works more reliably than SOCKET, but waveform acquisition is ~10 times slower
 #TODO: Stop aqcquire during adopt_local_setting
 #TODO: Timing does not match for 0.3 s: cycleTime=2.0, acquire_wf=0.7, sleep=1.0
@@ -149,14 +149,13 @@ class C_():
     previousScopeParametersQuery = ''
     channelsEnabled = []
     npoints = 0
-    #ypars = None
     scopeSeries = ''
     prevXpreamble =  (0., 0., 0)# xincr, xzero, recLength
     prevYpreamble = [(0., 0., 0., 1.)]*MAX_CHANNELS # yincr, yoffset, yzero, voltsPerDiv
 #``````````````````Setters````````````````````````````````````````````````````
 def scopeCmd(cmd):
     """Send blocking command to scope, return reply if any."""
-    printv(f'>scopeCmd: {cmd}')
+    printvv(f'>scopeCmd: {cmd}')
     reply = None
     try:
         if True:# with Lock:
@@ -297,14 +296,14 @@ def configure_scope():
 def refresh_channelsEnabled():
     """Refresh list of channels to read."""
     C_.channelsEnabled = []
-    printv(f'Checking channels for {pargs.channels} available channels')
+    #printv(f'Checking channels for {pargs.channels} available channels')
     for ch in range(pargs.channels):
         onoff = query([f'c{ch+1:02d}OnOff'])[0]
         #print(f'Channel {ch+1} OnOff: {onoff}')
         if onoff in ('1', 'ON', 'TRUE'):
             C_.channelsEnabled.append(f'CH{ch+1}')
         publish(f'c{ch+1:02d}OnOff', onoff, IF_CHANGED)
-    printv(f'Channels enabled: {C_.channelsEnabled}')
+    #printv(f'Channels enabled: {C_.channelsEnabled}')
 
 def update_scopeParameters():
     """Update sensitive scope parameters"""
@@ -428,7 +427,7 @@ def handle_exception(where):
 
 def interface_error():
     if 'TCPIP' in C_.resourceName:
-        print('You may need to disable VXI server on the instrument.')
+        print('Restart the server. If problem persists, you may need to disable VXI server on the instrument.')
     elif 'USB' in C_.resourceName:
         print('You may need to reset USB connection on the instrument as described here:')
         print('https://github.com/eicorg/epicsdev_osc_tektronix_mso/blob/main/docs/How_to_reset_USB_controller.md')
@@ -467,12 +466,12 @@ def adopt_local_setting():
 #``````````````````Acquisition-related functions`````````````````````````````````
 def trigger_is_detected():
     """check if scope was triggered"""
-    #print('Checking if trigger is detected...')
+    printvv('Checking if trigger is detected...')
     ts = timer()
     try:
         r = query(['trigState','scopeAcqCount'],
                     ['DATa:SOUrce:AVAILable'])
-        #print(f'Result of query: {r}')
+        printvv(f'Result of query: {r}')
     except visa.errors.VisaIOError as e:
         printe(f'Exception in query for trigger: {e}')
         for exc in C_.exceptionCount:
@@ -494,13 +493,14 @@ def trigger_is_detected():
     except Exception as e:
         printw(f'wrong trig info: {r}, exception:{e}')
         return False
-    #print(f'trigger_is_detected: trigState={trigstate}, numacq={numacq}')
-    if not trigstate.startswith('TRIG'):
-        #printw(f'Unexpected trigger state: {trigstate}')
-        return False
+
+    # This block is commented out because the trigger state may not always start with 'TRIG' even when a trigger is detected. The check for the trigger state has been simplified to focus on the acquisition count instead.
+    # if not trigstate.startswith('TRIG'):
+    #     #printw(f'Unexpected trigger state: {trigstate}')
+    #     return False
 
     numacq = int(numacq)
-    #print(f'Trigger check: trigState={trigstate}, numacq={numacq}, recLengthR={rl}, timePerDiv={timePerDiv}')
+    printvv(f'Trigger check: trigState={trigstate}, numacq={numacq}, C_.numacq={C_.numacq}')
     if numacq == 0 or C_.numacq == 0:
         C_.triggersLost = 0
     else:
@@ -515,7 +515,6 @@ def trigger_is_detected():
         return False
 
     # trigger detected
-    #print(f'Trigger detected: trigState={trigstate}, numacq={numacq}, recLengthR={rl}, timePerDiv={timePerDiv}')
     C_.numacq = numacq
     C_.trigTime = time.time()
     d = {'trigState':trigstate}
@@ -546,7 +545,8 @@ def _acquire(startStop = 'Start'):
 
 def acquire_waveforms():
     """Acquire waveforms from the device and publish them."""
-    #_acquire('Stop')  # Stop acquisition to ensure we get the latest data
+    if pargs.stopStart:
+        _acquire('Stop')  # Stop acquisition to ensure we get the latest data
     refresh_channelsEnabled()
     channels = C_.channelsEnabled
     printv(f'>acquire_waveform for channels {channels}')
@@ -581,14 +581,14 @@ def acquire_waveforms():
             except Exception as e:
                 printe(f'in query_binary_values: {e}')
                 break
+            printvv(f'Channel {ch}: waveform acquired, in {round(timer()-ts,6)} s, length: {len(bin_wave)}')
             ElapsedTime['query_wf'] += timer() - ts
             ts = timer()
 
             # Convert to vertical divisions
             yincr, yoffset, yzero, voltsPerDiv = C_.prevYpreamble[ch-1]
-            printv(f'Channel {ch}: yincr={yincr}, yoffset={yoffset}, yzero={yzero}, voltsPerDiv={voltsPerDiv}')
+            #printv(f'Channel {ch}: yincr={yincr}, yoffset={yoffset}, yzero={yzero}, voltsPerDiv={voltsPerDiv}')
             samplesv = (bin_wave - yoffset) * yincr + yzero# Convert to volts
-            printv(f'max,min: {samplesv.max(),samplesv.min()}')
             voffset = pvv(f'c{ch:02}Offset')
             samplesd = (samplesv/voltsPerDiv + voffset).astype(np.float32)  # Convert to divisions
 
@@ -607,7 +607,8 @@ def acquire_waveforms():
         ElapsedTime['publish_wf'] += timer() - ts
     ElapsedTime['acquire_wf'] = timer() - ElapsedTime['acquire_wf']
     #print(f'elapsedTime: {ElapsedTime}')
-    #_acquire('Start')  # Restart acquisition after reading waveforms
+    if pargs.stopStart:
+        _acquire('Start')  # Restart acquisition after reading waveforms
 
 def make_readSettingQuery():
     """Create combined SCPI query to read all settings at once"""
@@ -693,10 +694,11 @@ if __name__ == "__main__":
     'Resource string to access the device, e.g., TCPIP::192.168.1.100::INSTR. Note, the INSTR is more reliable, SOCKET is faster for long waveforms')
     parser.add_argument('-p', '--putlogPV', default='putlog:dump', help=
 'Name of the PV where put operations are logged. If None, then put operations are not logged.')
+    parser.add_argument('-s', '--stopStart', action='store_false', help=
+    'If not given, then stop acquire during waveform acquisition. DPO is twice faster in that case.')
     parser.add_argument('-v', '--verbose', action='count', default=0, help=
     'Show more log messages (-vv: show even more)') 
     pargs = parser.parse_args()
-    printv(f'pargs: {pargs}')
 
     init_visa()  # Initialize VISA and determine the number of channels if not provided
     printi(f'Number of channels determined: {pargs.channels}')
